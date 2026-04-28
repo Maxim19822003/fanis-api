@@ -51,7 +51,7 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/breakdowns', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM breakdowns WHERE active = true ORDER BY name');
+        const result = await pool.query('SELECT * FROM breakdowns WHERE active = true ORDER BY sort_order, name');
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: 'Database error', details: err.message });
@@ -60,7 +60,7 @@ app.get('/api/breakdowns', async (req, res) => {
 
 app.get('/api/breakdowns/all', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM breakdowns ORDER BY name');
+        const result = await pool.query('SELECT * FROM breakdowns ORDER BY sort_order, name');
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: 'Database error', details: err.message });
@@ -71,10 +71,10 @@ app.post('/api/breakdowns', async (req, res) => {
     const { name, emoji, steps, video_url, image_url, extra, contact, active } = req.body;
     try {
         const result = await pool.query(
-            `INSERT INTO breakdowns (name, emoji, steps, video_url, image_url, extra, contact, active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `INSERT INTO breakdowns (name, emoji, steps, video_url, image_url, extra, contact, active, sort_order)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING *`,
-            [name, emoji || '🔧', toPgArray(steps), video_url || '', image_url || '', extra || '', contact || 'fanis', active !== false]
+            [name, emoji || '🔧', toPgArray(steps), video_url || '', image_url || '', extra || '', contact || 'fanis', active !== false, req.body.sort_order || 0]
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -90,9 +90,9 @@ app.put('/api/breakdowns/:id', async (req, res) => {
         const result = await pool.query(
             `UPDATE breakdowns 
              SET name=$1, emoji=$2, steps=$3, video_url=$4, image_url=$5, 
-                 extra=$6, contact=$7, active=$8, updated_at=CURRENT_TIMESTAMP
-             WHERE id=$9 RETURNING *`,
-            [name, emoji, toPgArray(steps), video_url, image_url, extra, contact, active, id]
+                 extra=$6, contact=$7, active=$8, sort_order=$9, updated_at=CURRENT_TIMESTAMP
+             WHERE id=$10 RETURNING *`,
+            [name, emoji, toPgArray(steps), video_url, image_url, extra, contact, active, req.body.sort_order || 0, id]
         );
         if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
         res.json(result.rows[0]);
@@ -107,6 +107,19 @@ app.delete('/api/breakdowns/:id', async (req, res) => {
         await pool.query('DELETE FROM breakdowns WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (err) {
+        res.status(500).json({ error: 'Database error', details: err.message });
+    }
+});
+
+app.post('/api/breakdowns/reorder', async (req, res) => {
+    const { order } = req.body;
+    try {
+        await Promise.all(order.map(item => 
+            pool.query('UPDATE breakdowns SET sort_order=$1 WHERE id=$2', [item.sort_order, item.id])
+        ));
+        res.json({ success: true });
+    } catch (err) {
+        console.error('POST reorder error:', err);
         res.status(500).json({ error: 'Database error', details: err.message });
     }
 });
