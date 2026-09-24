@@ -25,9 +25,11 @@ app.use((req, res, next) => {
 });
 
 // PostgreSQL
+const dbUrl = process.env.DATABASE_URL || '';
+const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    connectionString: dbUrl,
+    ssl: (process.env.NODE_ENV === 'production' && !isLocalDb) ? { rejectUnauthorized: false } : false
 });
 
 pool.connect((err, client, release) => {
