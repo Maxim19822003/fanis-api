@@ -271,6 +271,41 @@ app.post('/api/admin/reset-password', async (req, res) => {
     }
 });
 
+
+// ============ ЗАГРУЗКА ВИДЕО ============
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+const VIDEOS_DIR = process.env.VIDEOS_DIR || '/var/www/fanis-app-/videos';
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, VIDEOS_DIR),
+    filename: (req, file, cb) => {
+        const ext = (path.extname(file.originalname) || '.mp4').toLowerCase();
+        const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 40) || 'video';
+        cb(null, Date.now() + '-' + base + ext);
+    }
+});
+const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+
+app.post('/api/admin/upload-video', upload.single('video'), async (req, res) => {
+    try {
+        const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['admin_password']);
+        const isValid = result.rows.length > 0 && await bcrypt.compare(req.body.password || '', result.rows[0].value);
+        if (!isValid) {
+            if (req.file) fs.unlink(req.file.path, () => {});
+            return res.status(401).json({ error: 'Неверный пароль' });
+        }
+        if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+        console.log('✅ Видео загружено:', req.file.filename, '(' + Math.round(req.file.size / 1024 / 1024) + ' МБ)');
+        res.json({ success: true, path: '/videos/' + req.file.filename });
+    } catch (err) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        res.status(500).json({ error: 'Upload error', details: err.message });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
