@@ -43,6 +43,23 @@ function toPgArray(arr) {
     return '{' + arr.map(s => '"' + String(s).replace(/"/g, '\\"') + '"').join(',') + '}';
 }
 
+// Приводит video_url (JSON-массив или legacy-строка через пробел) к массиву объектов {url, title, thumb}
+function migrateVideoUrl(videoUrl) {
+    if (!videoUrl) return [];
+    const s = String(videoUrl).trim();
+    let arr = null;
+    if (s.startsWith('[')) {
+        try { arr = JSON.parse(s); } catch (e) { arr = null; }
+    }
+    if (!Array.isArray(arr)) {
+        arr = s.split(/\s+/).filter(Boolean).map(url => ({ url }));
+    }
+    return arr
+        .map(v => (typeof v === 'string' ? { url: v } : v))
+        .map(v => ({ url: v.url || '', title: v.title || '', thumb: v.thumb || '' }))
+        .filter(v => v.url);
+}
+
 // ============ ROUTES ============
 
 app.get('/api/health', (req, res) => {
@@ -54,7 +71,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/breakdowns', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM breakdowns WHERE active = true ORDER BY sort_order, name');
-        res.json(result.rows);
+        res.json(result.rows.map(r => ({ ...r, video_url: JSON.stringify(migrateVideoUrl(r.video_url)) })));
     } catch (err) {
         res.status(500).json({ error: 'Database error', details: err.message });
     }
@@ -63,7 +80,7 @@ app.get('/api/breakdowns', async (req, res) => {
 app.get('/api/breakdowns/all', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM breakdowns ORDER BY sort_order, name');
-        res.json(result.rows);
+        res.json(result.rows.map(r => ({ ...r, video_url: JSON.stringify(migrateVideoUrl(r.video_url)) })));
     } catch (err) {
         res.status(500).json({ error: 'Database error', details: err.message });
     }
@@ -76,7 +93,7 @@ app.post('/api/breakdowns', async (req, res) => {
             `INSERT INTO breakdowns (name, emoji, steps, video_url, image_url, extra, contact, active, sort_order)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING *`,
-            [name, emoji || '🔧', toPgArray(steps), video_url || '', image_url || '', extra || '', contact || 'fanis', active !== false, req.body.sort_order || 0]
+            [name, emoji || '🔧', toPgArray(steps), JSON.stringify(migrateVideoUrl(video_url)), image_url || '', extra || '', contact || 'fanis', active !== false, req.body.sort_order || 0]
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -94,7 +111,7 @@ app.put('/api/breakdowns/:id', async (req, res) => {
              SET name=$1, emoji=$2, steps=$3, video_url=$4, image_url=$5, 
                  extra=$6, contact=$7, active=$8, sort_order=$9, updated_at=CURRENT_TIMESTAMP
              WHERE id=$10 RETURNING *`,
-            [name, emoji, toPgArray(steps), video_url, image_url, extra, contact, active, req.body.sort_order || 0, id]
+            [name, emoji, toPgArray(steps), JSON.stringify(migrateVideoUrl(video_url)), image_url, extra, contact, active, req.body.sort_order || 0, id]
         );
         if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
         res.json(result.rows[0]);
@@ -276,6 +293,9 @@ app.post('/api/admin/reset-password', async (req, res) => {
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
+const util = require('util');
+const execFileAsync = util.promisify(execFile);
 
 const VIDEOS_DIR = process.env.VIDEOS_DIR || '/var/www/fanis-app-/videos';
 
@@ -298,11 +318,42 @@ app.post('/api/admin/upload-video', upload.single('video'), async (req, res) => 
             return res.status(401).json({ error: 'Неверный пароль' });
         }
         if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+        // Обложка: скриншот первой секунды
+        const thumbName = req.file.filename.replace(/\.mp4$/i, '') + '-thumb.jpg';
+        const thumbPath = path.join(VIDEOS_DIR, thumbName);
+        try {
+            await execFileAsync('ffmpeg', ['-y', '-i', req.file.path, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', thumbPath]);
+        } catch (e) {
+            console.error('⚠️ ffmpeg не смог создать обложку:', e.message);
+        }
+
         console.log('✅ Видео загружено:', req.file.filename, '(' + Math.round(req.file.size / 1024 / 1024) + ' МБ)');
-        res.json({ success: true, path: '/videos/' + req.file.filename });
+        res.json({ success: true, path: '/videos/' + req.file.filename, thumb: '/videos/' + thumbName });
     } catch (err) {
         if (req.file) fs.unlink(req.file.path, () => {});
         res.status(500).json({ error: 'Upload error', details: err.message });
+    }
+});
+
+app.post('/api/admin/delete-video', async (req, res) => {
+    const { password, filePath } = req.body;
+    try {
+        const result = await pool.query('SELECT value FROM settings WHERE key = $1', ['admin_password']);
+        const isValid = result.rows.length > 0 && await bcrypt.compare(password || '', result.rows[0].value);
+        if (!isValid) return res.status(401).json({ error: 'Неверный пароль' });
+        if (!filePath || typeof filePath !== 'string') return res.status(400).json({ error: 'filePath обязателен' });
+
+        const fileName = path.basename(filePath); // защита от path traversal
+        const fileAbs = path.join(VIDEOS_DIR, fileName);
+        const thumbAbs = path.join(VIDEOS_DIR, fileName.replace(/\.mp4$/i, '') + '-thumb.jpg');
+
+        try { fs.unlinkSync(fileAbs); } catch (e) { console.error('Удаление mp4:', e.message); }
+        try { fs.unlinkSync(thumbAbs); } catch (e) {}
+        console.log('🗑️ Видео удалено:', fileName);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Delete error', details: err.message });
     }
 });
 
