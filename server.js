@@ -44,6 +44,16 @@ function toPgArray(arr) {
 }
 
 // Приводит video_url (JSON-массив или legacy-строка через пробел) к массиву объектов {url, title, thumb}
+// Возвращает путь к обложке для локального видео, если файл обложки существует
+function autoThumb(url) {
+    if (!url || typeof url !== 'string' || !url.startsWith('/videos/')) return '';
+    const fileName = path.basename(url).replace(/\.mp4$/i, '') + '-thumb.jpg';
+    try {
+        return fs.existsSync(path.join(VIDEOS_DIR, fileName)) ? '/videos/' + fileName : '';
+    } catch (e) { return ''; }
+}
+
+// Приводит video_url (JSON-массив или legacy-строка через пробел) к массиву объектов {url, title, thumb}
 function migrateVideoUrl(videoUrl) {
     if (!videoUrl) return [];
     const s = String(videoUrl).trim();
@@ -56,7 +66,7 @@ function migrateVideoUrl(videoUrl) {
     }
     return arr
         .map(v => (typeof v === 'string' ? { url: v } : v))
-        .map(v => ({ url: v.url || '', title: v.title || '', thumb: v.thumb || '' }))
+        .map(v => ({ url: v.url || '', title: v.title || '', thumb: v.thumb || autoThumb(v.url) }))
         .filter(v => v.url);
 }
 
